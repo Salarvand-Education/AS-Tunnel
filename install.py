@@ -195,10 +195,24 @@ def delete_tunnel():
     with open(DYNAMIC_FILE, "r") as dynamic_file:
         lines = dynamic_file.readlines()
 
+    # Filter out lines related to the specified port
+    new_lines = []
+    skip = False
+    for line in lines:
+        # Check if the line contains the port we want to delete
+        if f"port_{port}" in line or f"tcp_router_{port}" in line or f"tcp_service_{port}" in line:
+            skip = True  # Start skipping lines
+            continue
+        # If we're in a block to skip, check if we've reached the end of the block
+        if skip and line.strip() == "":  # Empty line indicates end of block
+            skip = False
+            continue
+        if not skip:
+            new_lines.append(line)
+
+    # Write the updated content back to the file
     with open(DYNAMIC_FILE, "w") as dynamic_file:
-        for line in lines:
-            if f"port_{port}" not in line and f"tcp_router_{port}" not in line and f"tcp_service_{port}" not in line:
-                dynamic_file.write(line)
+        dynamic_file.writelines(new_lines)
 
     restart_tunnel()
     print(f"Tunnel for port {port} has been deleted.")
