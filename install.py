@@ -5,9 +5,7 @@ import sys
 import subprocess
 import signal
 import socket
-import termcolor
 import requests
-from tqdm import tqdm
 
 # Constants
 CONFIG_DIR = "/etc/traefik/"
@@ -23,7 +21,7 @@ def run_command(command):
 
 # Function to handle Ctrl+C
 def signal_handler(sig, frame):
-    print(termcolor.colored("\nOperation cancelled by the user.", "red"))
+    print("\nOperation cancelled by the user.")
     sys.exit(0)
 
 signal.signal(signal.SIGINT, signal_handler)
@@ -33,7 +31,7 @@ def check_requirements():
     try:
         subprocess.run(["which", "traefik"], check=True)
     except subprocess.CalledProcessError:
-        print(termcolor.colored("Traefik is not installed. Installing Traefik...", "yellow"))
+        print("Traefik is not installed. Installing Traefik...")
         run_command(["curl", "-L", "https://github.com/traefik/traefik/releases/download/v3.1.0/traefik_v3.1.0_linux_amd64.tar.gz", "-o", "traefik.tar.gz"])
         run_command(["tar", "-xvzf", "traefik.tar.gz"])
         run_command(["sudo", "mv", "traefik", "/usr/local/bin/"])
@@ -82,7 +80,7 @@ def install_tunnel():
             version = '4'
             break
         else:
-            print(termcolor.colored("Invalid choice. Please enter '1' or '2'.", "red"))
+            print("Invalid choice. Please enter '1' or '2'.")
 
     ip_backend = input(f"Enter IPv{version} address of the backend server: ")
     ports = input("Enter the ports to tunnel (comma-separated): ")
@@ -90,7 +88,7 @@ def install_tunnel():
 
     for port in ports_list:
         if not check_port_available(int(port)):
-            print(termcolor.colored(f"Port {port} is already in use. Please choose another port.", "red"))
+            print(f"Port {port} is already in use. Please choose another port.")
             return
 
     create_config_files(ip_backend, ports_list)
@@ -117,7 +115,7 @@ WantedBy=multi-user.target
     run_command(["sudo", "systemctl", "enable", "traefik-tunnel.service"])
     run_command(["sudo", "systemctl", "start", "traefik-tunnel.service"])
 
-    print(termcolor.colored("Tunnel is being established and the service is running in the background...", "green"))
+    print("Tunnel is being established and the service is running in the background...")
 
 # Function to uninstall the tunnel
 def uninstall_tunnel():
@@ -131,24 +129,24 @@ def uninstall_tunnel():
         if os.path.exists(DYNAMIC_FILE):
             os.remove(DYNAMIC_FILE)
         run_command(["sudo", "systemctl", "daemon-reload"])
-        print(termcolor.colored("Tunnel has been successfully removed.", "green"))
+        print("Tunnel has been successfully removed.")
     except Exception as e:
-        print(termcolor.colored(f"An error occurred while removing the tunnel: {e}", "red"))
+        print(f"An error occurred while removing the tunnel: {e}")
 
 # Function to start the tunnel service
 def start_tunnel():
     run_command(["sudo", "systemctl", "start", "traefik-tunnel.service"])
-    print(termcolor.colored("Tunnel service started.", "green"))
+    print("Tunnel service started.")
 
 # Function to stop the tunnel service
 def stop_tunnel():
     run_command(["sudo", "systemctl", "stop", "traefik-tunnel.service"])
-    print(termcolor.colored("Tunnel service stopped.", "green"))
+    print("Tunnel service stopped.")
 
 # Function to restart the tunnel service
 def restart_tunnel():
     run_command(["sudo", "systemctl", "restart", "traefik-tunnel.service"])
-    print(termcolor.colored("Tunnel service restarted.", "green"))
+    print("Tunnel service restarted.")
 
 # Function to display tunnel status
 def display_tunnel_status():
@@ -159,18 +157,18 @@ def display_tunnel_status():
             routers = status.get('tcp', {}).get('routers', {})
             services = status.get('tcp', {}).get('services', {})
             
-            print(termcolor.colored("Routers:", "yellow"))
+            print("Routers:")
             for router, details in routers.items():
                 print(f"  - {router}: {details}")
 
-            print(termcolor.colored("Services:", "yellow"))
+            print("Services:")
             for service, details in services.items():
                 print(f"  - {service}: {details}")
-            print(termcolor.colored("Tunnel is up and running.", "green"))
+            print("Tunnel is up and running.")
         else:
-            print(termcolor.colored("Failed to retrieve Traefik status. Please check if Traefik is running.", "red"))
+            print("Failed to retrieve Traefik status. Please check if Traefik is running.")
     except requests.exceptions.RequestException as e:
-        print(termcolor.colored(f"Error connecting to Traefik API: {e}", "red"))
+        print(f"Error connecting to Traefik API: {e}")
 
 # Function to add a new tunnel
 def add_tunnel():
@@ -180,18 +178,18 @@ def add_tunnel():
 
     for port in ports_list:
         if not check_port_available(int(port)):
-            print(termcolor.colored(f"Port {port} is already in use. Please choose another port.", "red"))
+            print(f"Port {port} is already in use. Please choose another port.")
             return
 
     create_config_files(ip_backend, ports_list)
     restart_tunnel()
-    print(termcolor.colored("New tunnel added and service restarted.", "green"))
+    print("New tunnel added and service restarted.")
 
 # Function to delete a tunnel
 def delete_tunnel():
     port = input("Enter the port to delete: ")
     if not os.path.exists(DYNAMIC_FILE):
-        print(termcolor.colored("No tunnels configured.", "red"))
+        print("No tunnels configured.")
         return
 
     with open(DYNAMIC_FILE, "r") as dynamic_file:
@@ -203,12 +201,12 @@ def delete_tunnel():
                 dynamic_file.write(line)
 
     restart_tunnel()
-    print(termcolor.colored(f"Tunnel for port {port} has been deleted.", "green"))
+    print(f"Tunnel for port {port} has been deleted.")
 
 # Function to view all tunnels
 def view_tunnels():
     if not os.path.exists(DYNAMIC_FILE):
-        print(termcolor.colored("No tunnels configured.", "red"))
+        print("No tunnels configured.")
         return
 
     with open(DYNAMIC_FILE, "r") as dynamic_file:
@@ -222,10 +220,10 @@ def view_tunnels():
             tunnels.append(ip_port)
 
     if not tunnels:
-        print(termcolor.colored("No tunnels configured.", "red"))
+        print("No tunnels configured.")
         return
 
-    print(termcolor.colored("Configured Tunnels:", "yellow"))
+    print("Configured Tunnels:")
     for i, tunnel in enumerate(tunnels, start=1):
         print(f"{i}: {tunnel}")
 
