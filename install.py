@@ -374,7 +374,7 @@ WantedBy=multi-user.target"""
             config["tcp"]["routers"][router_name] = {
                 "entryPoints": [f"port_{port}"],
                 "service": service_name,
-                "rule": "HostSNI(`*`)"
+                "rule": True  # تغییر این خط
             }
 
             config["tcp"]["services"][service_name] = {
@@ -474,7 +474,8 @@ WantedBy=multi-user.target"""
                         "port": port,
                         "local_address": entry_data.get("address", "unknown"),
                         "backend": "unknown",
-                        "status": "unknown"
+                        "status": "unknown",
+                        "rule": "unknown"  # اضافه کردن این خط
                     }
                     
                     # Get backend information
@@ -483,8 +484,13 @@ WantedBy=multi-user.target"""
                         if servers:
                             tunnel["backend"] = servers[0].get("address", "unknown")
                     
+                    # Get rule information
+                    router_name = f"tcp_router_{port}"
+                    if router_name in dynamic_config.get("tcp", {}).get("routers", {}):
+                        tunnel["rule"] = dynamic_config["tcp"]["routers"][router_name].get("rule", "unknown")
+                
                     tunnels.append(tunnel)
-                    
+                
             return tunnels
         except Exception as e:
             print(termcolor.colored(f"Error reading config: {str(e)}", "red"))
@@ -536,6 +542,7 @@ WantedBy=multi-user.target"""
                 output.append(f"  Status: {tunnel.get('status', 'unknown')}")
                 output.append(f"  Backend: {tunnel.get('backend', 'unknown')}")
                 output.append(f"  Local Address: {tunnel.get('local_address', 'unknown')}")
+                output.append(f"  Rule: {tunnel.get('rule', 'unknown')}")  # اضافه کردن این خط
                 output.append("")
         
         return "\n".join(output)
