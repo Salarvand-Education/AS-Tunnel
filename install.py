@@ -59,16 +59,6 @@ class TunnelManager:
         self.stop_monitoring()
         sys.exit(0)
 
-    def _check_requirements(self):
-        try:
-            subprocess.run(["which", "traefik"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        except subprocess.CalledProcessError:
-            print(termcolor.colored("Traefik is not installed. Installing Traefik...", "yellow"))
-            run_command(["curl", "-L", "https://github.com/traefik/traefik/releases/download/v3.1.0/traefik_v3.1.0_linux_amd64.tar.gz", "-o", "traefik.tar.gz"])
-            run_command(["tar", "-xzf", "traefik.tar.gz"])
-            run_command(["sudo", "mv", "traefik", "/usr/local/bin/"])
-            os.remove("traefik.tar.gz")
-
     def start_monitoring(self):
         self.running = True
         self.monitor_thread = threading.Thread(target=self._monitor_tunnels)
@@ -138,6 +128,16 @@ class TunnelManager:
         except Exception as e:
             print(termcolor.colored(f"Installation failed: {str(e)}", "red"))
             return False
+
+    def _check_requirements(self):
+        try:
+            subprocess.run(["which", "traefik"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except subprocess.CalledProcessError:
+            print(termcolor.colored("Traefik is not installed. Installing Traefik...", "yellow"))
+            run_command(["curl", "-L", "https://github.com/traefik/traefik/releases/download/v3.1.0/traefik_v3.1.0_linux_amd64.tar.gz", "-o", "traefik.tar.gz"])
+            run_command(["tar", "-xzf", "traefik.tar.gz"])
+            run_command(["sudo", "mv", "traefik", "/usr/local/bin/"])
+            os.remove("traefik.tar.gz")
 
     def delete_tunnel(self, ports_to_delete):
         try:
@@ -344,7 +344,7 @@ WantedBy=multi-user.target"""
             "active_tunnels": [],
             "errors": []
         }
-
+        
         if 'tcp' in status_data and 'routers' in status_data['tcp']:
             for router, details in status_data['tcp']['routers'].items():
                 tunnel_info = {
@@ -352,7 +352,12 @@ WantedBy=multi-user.target"""
                     "status": "active" if details.get('status') == 'enabled' else "inactive",
                     "service": details.get('service'),
                     "backend": self._get_backend_address(details.get('service'), status_data)
-                     def _get_backend_address(self, service_name, status_data):
+                }
+                result["active_tunnels"].append(tunnel_info)
+                
+        return result
+
+    def _get_backend_address(self, service_name, status_data):
         try:
             service = status_data['tcp']['services'][service_name]
             return service['loadBalancer']['servers'][0]['address']
@@ -403,4 +408,4 @@ def main():
 
 if __name__ == "__main__":
     check_and_install_modules()
-    main()                                    
+    main()
