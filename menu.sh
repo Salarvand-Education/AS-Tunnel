@@ -8,20 +8,36 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# GitHub repository details
+# Configuration
 REPO_URL="https://raw.githubusercontent.com/Salarvand-Education/AS-Tunnel/main/install.py"
 SCRIPT_NAME="install.py"
-
-# Virtual environment name
 VENV_NAME="tunnel_venv"
+DEFAULT_API_PORT=8081
+CONFIG_FILE="/etc/traefik/api_port.conf"
 
-# Required packages
-PACKAGES=(
-    "termcolor"
-    "requests"
-    "pyyaml"
-    "tqdm"
-)
+# Initialize API port
+if [ -f "$CONFIG_FILE" ]; then
+    API_PORT=$(cat "$CONFIG_FILE")
+else
+    API_PORT=$DEFAULT_API_PORT
+fi
+
+# Error handling
+set -e
+trap 'handle_error $? $LINENO' ERR
+
+handle_error() {
+    local exit_code=$1
+    local line_number=$2
+    echo -e "${RED}Error occurred in script at line $line_number. Exit code: $exit_code${NC}"
+    cleanup
+    exit 1
+}
+
+cleanup() {
+    echo -e "${YELLOW}Performing cleanup...${NC}"
+    deactivate 2>/dev/null || true
+}
 
 # Clear screen function
 clear_screen() {
@@ -42,20 +58,42 @@ print_menu() {
     echo -e "${YELLOW}1. Install New Tunnel"
     echo "2. Delete Existing Tunnels"
     echo "3. Display Tunnel Status"
-    echo "4. List Active Tunnels"
+    echo "4. Start Tunnel Monitor"
     echo "5. Uninstall Service"
     echo "6. Update Source File"
+    echo "7. Configure API Port"
     echo -e "0. Exit${NC}"
 }
 
-# Download source file
-download_source() {
-    echo -e "${BLUE}Downloading source file from GitHub...${NC}"
-    if curl -sSL "$REPO_URL" -o "$SCRIPT_NAME"; then
-        echo -e "${GREEN}Successfully downloaded $SCRIPT_NAME${NC}"
-    else
-        echo -e "${RED}Failed to download source file${NC}"
+# Check sudo access
+check_sudo() {
+    if ! sudo -v &>/dev/null; then
+        echo -e "${RED}Error: This script requires sudo privileges${NC}"
         exit 1
+    fi
+}
+
+# Configure API port
+configure_api_port() {
+    echo -e "${CYAN}=== Configure API Port ===${NC}"
+    echo -e "Current API port: $API_PORT"
+    echo -e "Enter new API port (1024-65535, default is ${DEFAULT_API_PORT}):"
+    read -r new_port
+    
+    if [[ "$new_port" =~ ^[0-9]+$ && "$new_port" -ge 1024 && "$new_port" -le 65535 ]]; then
+        # Save the new port to config file
+        echo "$new_port" | sudo tee "$CONFIG_FILE" > /dev/null
+        API_PORT=$new_port
+        echo -e "${GREEN}API port updated to: $API_PORT${NC}"
+        
+        # Restart service if it exists
+        if [ -f "/etc/systemd/system/traefik-tunnel.service" ]; then
+            echo -e "${YELLOW}Restarting Traefik service...${NC}"
+            sudo systemctl restart traefik-tunnel.service
+        fi
+    else
+        echo -e "${RED}Invalid port number. Using default: ${DEFAULT_API_PORT}${NC}"
+        API_PORT=$DEFAULT_API_PORT
     fi
 }
 
@@ -63,30 +101,32 @@ download_source() {
 check_system_dependencies() {
     echo -e "${BLUE}Checking system dependencies...${NC}"
     
-    # Check for curl
-    if ! command -v curl &> /dev/null; then
-        echo -e "${YELLOW}Installing curl...${NC}"
+    local packages=("curl" "python3" "python3-pip" "python3-venv")
+    local missing_packages=()
+    
+    for pkg in "${packages[@]}"; do
+        if ! dpkg -l | grep -q "^ii  $pkg "; then
+            missing_packages+=("$pkg")
+        fi
+    done
+    
+    if [ ${#missing_packages[@]} -ne 0 ]; then
+        echo -e "${YELLOW}Installing missing packages: ${missing_packages[*]}${NC}"
         sudo apt update
-        sudo apt install -y curl
+        sudo apt install -y "${missing_packages[@]}"
     fi
+}
 
-    # Check for Python3
-    if ! command -v python3 &> /dev/null; then
-        echo -e "${YELLOW}Installing Python3...${NC}"
-        sudo apt update
-        sudo apt install -y python3
-    fi
-
-    # Check for pip
-    if ! command -v pip3 &> /dev/null; then
-        echo -e "${YELLOW}Installing pip3...${NC}"
-        sudo apt install -y python3-pip
-    fi
-
-    # Check for python3-venv
-    if ! dpkg -l | grep -q python3-venv; then
-        echo -e "${YELLOW}Installing python3-venv...${NC}"
-        sudo apt install -y python3-venv
+# Download source file
+download_source() {
+    echo -e "${BLUE}Downloading source file from GitHub...${NC}"
+    
+    if curl -# -o "$SCRIPT_NAME" "$REPO_URL"; then
+        echo -e "${GREEN}Successfully downloaded $SCRIPT_NAME${NC}"
+        chmod +x "$SCRIPT_NAME"
+    else
+        echo -e "${RED}Failed to download source file${NC}"
+        exit 1
     fi
 }
 
@@ -94,22 +134,15 @@ check_system_dependencies() {
 setup_venv() {
     echo -e "${BLUE}Setting up virtual environment...${NC}"
     
-    # Create virtual environment if it doesn't exist
     if [ ! -d "$VENV_NAME" ]; then
         python3 -m venv "$VENV_NAME"
     fi
     
-    # Activate virtual environment
     source "$VENV_NAME/bin/activate"
+    python3 -m pip install --upgrade pip
     
-    # Upgrade pip
-    pip install --upgrade pip
-    
-    # Install required packages
     echo -e "${BLUE}Installing required Python packages...${NC}"
-    for package in "${PACKAGES[@]}"; do
-        pip install "$package"
-    done
+    pip install termcolor requests pyyaml tqdm
 }
 
 # Check if Python script exists
@@ -122,7 +155,7 @@ check_script() {
 # Run Python script in virtual environment
 run_python_script() {
     source "$VENV_NAME/bin/activate"
-    python3 "$@"
+    python3 "$@" "$API_PORT"
     deactivate
 }
 
@@ -133,7 +166,8 @@ main_menu() {
         print_header
         print_menu
         
-        echo -e "\n${GREEN}Please select an option:${NC} "
+        echo -e "\n${GREEN}Current API Port: ${API_PORT}${NC}"
+        echo -e "${GREEN}Please select an option:${NC} "
         read -r choice
         
         case $choice in
@@ -164,8 +198,8 @@ main_menu() {
             4)
                 clear_screen
                 print_header
-                echo -e "${CYAN}=== Active Tunnels List ===${NC}\n"
-                run_python_script "$SCRIPT_NAME" list
+                echo -e "${CYAN}=== Start Tunnel Monitor ===${NC}\n"
+                run_python_script "$SCRIPT_NAME" monitor
                 echo -e "\n${YELLOW}Press Enter to return to menu...${NC}"
                 read -r
                 ;;
@@ -189,9 +223,16 @@ main_menu() {
                 echo -e "\n${YELLOW}Press Enter to return to menu...${NC}"
                 read -r
                 ;;
+            7)
+                clear_screen
+                print_header
+                configure_api_port
+                echo -e "\n${YELLOW}Press Enter to return to menu...${NC}"
+                read -r
+                ;;
             0)
                 echo -e "\n${RED}Exiting...${NC}"
-                deactivate 2>/dev/null || true
+                cleanup
                 exit 0
                 ;;
             *)
@@ -203,9 +244,10 @@ main_menu() {
 }
 
 # Handle Ctrl+C
-trap 'echo -e "\n${YELLOW}Program terminated by user${NC}"; deactivate 2>/dev/null || true; exit 0' SIGINT
+trap 'echo -e "\n${YELLOW}Program terminated by user${NC}"; cleanup; exit 0' SIGINT
 
 # Main execution
+check_sudo
 check_system_dependencies
 check_script
 setup_venv
