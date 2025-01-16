@@ -233,6 +233,122 @@ WantedBy=multi-user.target"""
                 if attempt == RETRY_ATTEMPTS - 1:
                     print(termcolor.colored(f"Failed to recover service after {RETRY_ATTEMPTS} attempts", "red"))
 
+    def install_tunnel(self, ip_version, ip_backend, ports):
+        """Install and configure a new tunnel."""
+        try:
+            self._validate_inputs(ip_version, ip_backend, ports)
+            self._check_requirements()
+            self._create_configs(ip_backend, ports)
+            self._setup_service()
+            self.start_monitoring()
+            print(termcolor.colored("Tunnel installed successfully!", "green"))
+            return True
+        except Exception as e:
+            print(termcolor.colored(f"Installation failed: {str(e)}", "red"))
+            return False
+
+    def delete_tunnel(self, ports_to_delete):
+        """Delete one or more tunnels by their ports."""
+        try:
+            traefik_config = self._load_config(CONFIG_FILE)
+            dynamic_config = self._load_config(DYNAMIC_FILE)
+
+            if not traefik_config or not dynamic_config:
+                print(termcolor.colored("No tunnel configuration found.", "red"))
+                return False
+
+            for port in ports_to_delete:
+                entry_point = f"port_{port}"
+                if "entryPoints" in traefik_config and entry_point in traefik_config["entryPoints"]:
+                    del traefik_config["entryPoints"][entry_point]
+
+                router_name = f"tcp_router_{port}"
+                service_name = f"tcp_service_{port}"
+
+                if router_name in dynamic_config["tcp"]["routers"]:
+                    del dynamic_config["tcp"]["routers"][router_name]
+                if service_name in dynamic_config["tcp"]["services"]:
+                    del dynamic_config["tcp"]["services"][service_name]
+
+            self._save_config(CONFIG_FILE, traefik_config)
+            self._save_config(DYNAMIC_FILE, dynamic_config)
+
+            subprocess.run(["sudo", "systemctl", "restart", "traefik-tunnel.service"], check=True)
+            print(termcolor.colored("\nSelected tunnels have been deleted successfully.", "green"))
+            return True
+
+        except Exception as e:
+            print(termcolor.colored(f"Error deleting tunnels: {str(e)}", "red"))
+            return False
+
+    def _validate_inputs(self, ip_version, ip_backend, ports):
+        """Validate user inputs for IP version, backend IP, and ports."""
+        if ip_version not in ['4', '6']:
+            raise ValueError("Invalid IP version")
+            
+        try:
+            socket.inet_pton(socket.AF_INET if ip_version == '4' else socket.AF_INET6, ip_backend)
+        except socket.error:
+            raise ValueError(f"Invalid IPv{ip_version} address format")
+
+        for port in ports:
+            try:
+                port_num = int(port)
+                if not 1 <= port_num <= 65535:
+                    raise ValueError(f"Port {port} out of valid range (1-65535)")
+                if not self._check_port_available(port_num):
+                    raise ValueError(f"Port {port} is already in use")
+            except ValueError as e:
+                raise ValueError(f"Invalid port number: {str(e)}")
+
+    def _check_port_available(self, port):
+        """Check if a port is available for binding."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind(('0.0.0.0', port))
+                return True
+            except socket.error:
+                return False
+
+    def _create_configs(self, ip_backend, ports):
+        """Create Traefik configuration files."""
+        traefik_config = self._load_config(CONFIG_FILE) or self._get_default_traefik_config()
+        dynamic_config = self._load_config(DYNAMIC_FILE) or {"tcp": {"routers": {}, "services": {}}}
+
+        self._update_traefik_config(traefik_config, ports)
+        self._update_dynamic_config(dynamic_config, ip_backend, ports)
+
+        self._save_config(CONFIG_FILE, traefik_config)
+        self._save_config(DYNAMIC_FILE, dynamic_config)
+
+    def _update_traefik_config(self, config, ports):
+        """Update Traefik configuration with new ports."""
+        for port in ports:
+            entry_point_name = f"port_{port}"
+            if "entryPoints" not in config:
+                config["entryPoints"] = {}
+            config["entryPoints"][entry_point_name] = {
+                "address": f"0.0.0.0:{port}"
+            }
+
+    def _update_dynamic_config(self, config, ip_backend, ports):
+        """Update dynamic configuration with backend IP and ports."""
+        for port in ports:
+            router_name = f"tcp_router_{port}"
+            service_name = f"tcp_service_{port}"
+
+            config["tcp"]["routers"][router_name] = {
+                "entryPoints": [f"port_{port}"],
+                "service": service_name,
+                "rule": "HostSNI(`*`)"
+            }
+
+            config["tcp"]["services"][service_name] = {
+                "loadBalancer": {
+                    "servers": [{"address": f"{ip_backend}:{port}"}]
+                }
+            }
+
     def _load_config(self, filename):
         """Load a YAML configuration file."""
         try:
@@ -253,7 +369,7 @@ WantedBy=multi-user.target"""
             raise Exception(f"Failed to save config {filename}: {str(e)}")
 
     def get_status(self):
-        """Get detailed status of all configured tunnels"""
+        """Get detailed status of all configured tunnels."""
         try:
             # First check if service is running
             service_status = subprocess.run(
@@ -301,7 +417,7 @@ WantedBy=multi-user.target"""
             }
 
     def _get_tunnels_from_config(self):
-        """Extract tunnel information from configuration files"""
+        """Extract tunnel information from configuration files."""
         tunnels = []
         try:
             # Load configs
@@ -341,7 +457,7 @@ WantedBy=multi-user.target"""
             return []
 
     def _get_api_status(self):
-        """Get status information from Traefik API"""
+        """Get status information from Traefik API."""
         api_urls = [
             f"http://127.0.0.1:{self.api_port}/api/tcp/routers",
             f"http://localhost:{self.api_port}/api/tcp/routers",
@@ -372,7 +488,7 @@ WantedBy=multi-user.target"""
         return {"active_tunnels": []}
 
     def _format_status_output(self, status):
-        """Format status information for display"""
+        """Format status information for display."""
         output = []
         output.append(f"\nServer IP: {status.get('server_ip', 'unknown')}")
         output.append("\nActive Tunnels:")
