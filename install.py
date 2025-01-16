@@ -233,6 +233,25 @@ WantedBy=multi-user.target"""
                 if attempt == RETRY_ATTEMPTS - 1:
                     print(termcolor.colored(f"Failed to recover service after {RETRY_ATTEMPTS} attempts", "red"))
 
+    def _load_config(self, filename):
+        """Load a YAML configuration file."""
+        try:
+            if os.path.exists(filename):
+                with open(filename, 'r') as f:
+                    return yaml.safe_load(f)
+        except Exception as e:
+            print(termcolor.colored(f"Error loading config {filename}: {str(e)}", "red"))
+        return None
+
+    def _save_config(self, filename, config):
+        """Save a YAML configuration file."""
+        try:
+            os.makedirs(os.path.dirname(filename), exist_ok=True)
+            with open(filename, 'w') as f:
+                yaml.dump(config, f, default_flow_style=False)
+        except Exception as e:
+            raise Exception(f"Failed to save config {filename}: {str(e)}")
+
     def get_status(self):
         """Get detailed status of all configured tunnels"""
         try:
