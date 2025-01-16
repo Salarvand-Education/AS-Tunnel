@@ -48,7 +48,24 @@ class TunnelManager:
         self.monitor_thread = None
         self.last_error = None
         self.tunnels = {}
+        self.server_ip = self._get_server_ip()
         self._setup_signal_handlers()
+
+    def _get_server_ip(self):
+        try:
+            # تلاش برای دریافت IP عمومی
+            cmd = "curl -s http://ipv4.icanhazip.com"
+            public_ip = subprocess.check_output(cmd, shell=True).decode('utf-8').strip()
+            if public_ip:
+                return public_ip
+        except:
+            try:
+                # تلاش برای دریافت IP داخلی
+                cmd = "hostname -I | cut -d' ' -f1"
+                local_ip = subprocess.check_output(cmd, shell=True).decode('utf-8').strip()
+                return local_ip
+            except:
+                return 'localhost'
 
     def _setup_signal_handlers(self):
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -107,20 +124,13 @@ class TunnelManager:
                 print(termcolor.colored("Waiting for service to start...", "yellow"))
                 time.sleep(10)
             
-            # Check logs for any issues
-            print(termcolor.colored("Checking service logs...", "yellow"))
-            logs = subprocess.run(["journalctl", "-u", "traefik-tunnel.service", "-n", "50"], 
-                                capture_output=True, text=True)
-            if "error" in logs.stdout.lower():
-                print(termcolor.colored(f"Service logs show errors:\n{logs.stdout}", "red"))
-            
-            print(termcolor.colored(f"Attempting to connect to API at port {self.api_port}...", "yellow"))
+            print(termcolor.colored(f"Attempting to connect to API at {self.server_ip}:{self.api_port}...", "yellow"))
             max_retries = 3
             retry_delay = 5
             
             for retry in range(max_retries):
                 try:
-                    api_url = f"http://localhost:{self.api_port}/api/rawdata"
+                    api_url = f"http://{self.server_ip}:{self.api_port}/api/rawdata"
                     response = requests.get(api_url, timeout=10)
                     if response.status_code == 200:
                         print(termcolor.colored("Successfully connected to API", "green"))
@@ -149,18 +159,6 @@ class TunnelManager:
             except Exception as e:
                 if attempt == RETRY_ATTEMPTS - 1:
                     print(termcolor.colored(f"Failed to recover service after {RETRY_ATTEMPTS} attempts", "red"))
-
-    def check_traefik_logs(self):
-        try:
-            logs = subprocess.run(
-                ["journalctl", "-u", "traefik-tunnel.service", "-n", "50"],
-                capture_output=True,
-                text=True
-            ).stdout
-            print(termcolor.colored("Recent Traefik logs:", "yellow"))
-            print(logs)
-        except Exception as e:
-            print(termcolor.colored(f"Error getting logs: {str(e)}", "red"))
 
     def install_tunnel(self, ip_version, ip_backend, ports):
         try:
@@ -206,8 +204,7 @@ class TunnelManager:
         except Exception as e:
             print(termcolor.colored(f"Error deleting tunnels: {str(e)}", "red"))
             return False
-
-    def uninstall(self):
+            def uninstall(self):
         try:
             print(termcolor.colored("Stopping Traefik service...", "yellow"))
             subprocess.run(["sudo", "systemctl", "stop", "traefik-tunnel.service"], check=True)
@@ -262,7 +259,7 @@ class TunnelManager:
     def _check_port_available(self, port):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             try:
-                sock.bind(('localhost', port))
+                sock.bind((self.server_ip, port))
                 return True
             except socket.error:
                 return False
@@ -356,7 +353,8 @@ WantedBy=multi-user.target"""
         subprocess.run(["sudo", "systemctl", "restart", "traefik-tunnel.service"], check=True)
         print(termcolor.colored("Waiting for service to initialize...", "yellow"))
         time.sleep(10)
-        def _load_config(self, filename):
+
+    def _load_config(self, filename):
         try:
             if os.path.exists(filename):
                 with open(filename, 'r') as f:
@@ -375,7 +373,7 @@ WantedBy=multi-user.target"""
 
     def get_status(self):
         try:
-            api_url = f"http://localhost:{self.api_port}/api/rawdata"
+            api_url = f"http://{self.server_ip}:{self.api_port}/api/rawdata"
             response = requests.get(api_url, timeout=5)
             if response.status_code == 200:
                 return self._parse_status(response.json())
