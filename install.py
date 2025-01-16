@@ -3,174 +3,223 @@ import sys
 import subprocess
 import signal
 import socket
+import time
+import threading
+from datetime import datetime
 import termcolor
 import requests
 import yaml
 from tqdm import tqdm
 
-# مسیرهای فایل‌های پیکربندی
+# Global Configuration
 CONFIG_DIR = "/etc/traefik/"
 CONFIG_FILE = os.path.join(CONFIG_DIR, "traefik.yml")
 DYNAMIC_FILE = os.path.join(CONFIG_DIR, "dynamic.yml")
 SERVICE_FILE = "/etc/systemd/system/traefik-tunnel.service"
+RETRY_ATTEMPTS = 3
+RETRY_DELAY = 5
+KEEPALIVE_INTERVAL = 30
 
-def run_command(command):
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    stdout, stderr = process.communicate()
-    if process.returncode != 0:
-        print(termcolor.colored(f"Error: {stderr}", "red"))
-    return process.returncode
+class TunnelManager:
+    def __init__(self):
+        self.running = False
+        self.monitor_thread = None
+        self.last_error = None
+        self.tunnels = {}
+        self._setup_signal_handlers()
 
-def check_and_install_modules():
-    modules = ["tqdm", "termcolor", "requests", "pyyaml"]
-    try:
-        import pkg_resources
-        installed = {pkg.key for pkg in pkg_resources.working_set}
-        for module in modules:
-            if module not in installed:
-                run_command([sys.executable, "-m", "pip", "install", module])
-    except Exception:
-        run_command(["sudo", "apt", "update"])
-        run_command(["sudo", "apt", "install", "-y", "python3-pip"])
-        for module in modules:
-            run_command([sys.executable, "-m", "pip", "install", module])
+    def _setup_signal_handlers(self):
+        """Setup handlers for system signals"""
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
 
-def signal_handler(sig, frame):
-    print(termcolor.colored("\nOperation cancelled by the user.", "red"))
-    sys.exit(0)
+    def _signal_handler(self, signum, frame):
+        """Handle system signals gracefully"""
+        print(termcolor.colored("\nReceived shutdown signal. Cleaning up...", "yellow"))
+        self.stop_monitoring()
+        sys.exit(0)
 
-signal.signal(signal.SIGINT, signal_handler)
+    def start_monitoring(self):
+        """Start tunnel monitoring"""
+        self.running = True
+        self.monitor_thread = threading.Thread(target=self._monitor_tunnels)
+        self.monitor_thread.daemon = True
+        self.monitor_thread.start()
+        print(termcolor.colored("Tunnel monitoring started", "green"))
 
-def check_requirements():
-    try:
-        subprocess.run(["which", "traefik"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except subprocess.CalledProcessError:
-        print(termcolor.colored("Traefik is not installed. Installing Traefik...", "yellow"))
-        run_command(["curl", "-L", "https://github.com/traefik/traefik/releases/download/v3.1.0/traefik_v3.1.0_linux_amd64.tar.gz", "-o", "traefik.tar.gz"])
-        run_command(["tar", "-xzf", "traefik.tar.gz"])
-        run_command(["sudo", "mv", "traefik", "/usr/local/bin/"])
-        os.remove("traefik.tar.gz")
+    def stop_monitoring(self):
+        """Stop tunnel monitoring"""
+        self.running = False
+        if self.monitor_thread:
+            self.monitor_thread.join()
+        print(termcolor.colored("Tunnel monitoring stopped", "yellow"))
 
-def check_port_available(port):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        result = sock.connect_ex(('localhost', int(port)))
-        return result != 0
+    def _monitor_tunnels(self):
+        """Continuously monitor tunnels and attempt recovery if needed"""
+        while self.running:
+            try:
+                self._check_service_health()
+                self._update_tunnel_status()
+                time.sleep(KEEPALIVE_INTERVAL)
+            except Exception as e:
+                self.last_error = str(e)
+                print(termcolor.colored(f"Error detected: {self.last_error}", "red"))
+                self._attempt_recovery()
 
-def load_existing_config():
-    traefik_config = {}
-    dynamic_config = {"tcp": {"routers": {}, "services": {}}}
-    
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r') as f:
-            traefik_config = yaml.safe_load(f) or {}
-    
-    if os.path.exists(DYNAMIC_FILE):
-        with open(DYNAMIC_FILE, 'r') as f:
-            dynamic_config = yaml.safe_load(f) or {"tcp": {"routers": {}, "services": {}}}
-    
-    return traefik_config, dynamic_config
+    def _check_service_health(self):
+        """Check the health of the Traefik service"""
+        try:
+            result = subprocess.run(
+                ["systemctl", "is-active", "traefik-tunnel.service"],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            if result.stdout.strip() != "active":
+                raise Exception("Traefik service is not active")
 
-def merge_configs(existing_config, new_ports, ip_backend=None):
-    # تنظیمات پایه اگر فایل خالی باشد
-    if not existing_config:
-        existing_config = {
-            "entryPoints": {},
-            "providers": {
-                "file": {
-                    "filename": "/etc/traefik/dynamic.yml"
+            response = requests.get("http://localhost:8080/api/rawdata", timeout=5)
+            if response.status_code != 200:
+                raise Exception(f"API returned unexpected status: {response.status_code}")
+
+        except subprocess.CalledProcessError:
+            raise Exception("Failed to check service status")
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Failed to connect to Traefik API: {str(e)}")
+
+    def _attempt_recovery(self):
+        """Attempt to recover the service after failure"""
+        for attempt in range(RETRY_ATTEMPTS):
+            try:
+                print(termcolor.colored(f"Recovery attempt {attempt + 1}/{RETRY_ATTEMPTS}...", "yellow"))
+                subprocess.run(["sudo", "systemctl", "restart", "traefik-tunnel.service"], check=True)
+                time.sleep(RETRY_DELAY)
+                self._check_service_health()
+                print(termcolor.colored("Service recovered successfully", "green"))
+                return
+            except Exception as e:
+                if attempt == RETRY_ATTEMPTS - 1:
+                    print(termcolor.colored(f"Failed to recover service after {RETRY_ATTEMPTS} attempts", "red"))
+                    self._log_error(str(e))
+
+    def _log_error(self, error_message):
+        """Log error messages with timestamp"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        error_log = f"[{timestamp}] {error_message}\n"
+        try:
+            with open(os.path.join(CONFIG_DIR, "tunnel_errors.log"), "a") as f:
+                f.write(error_log)
+        except Exception:
+            pass  # Fail silently if cannot write to log
+
+    def install_tunnel(self, ip_version, ip_backend, ports):
+        """Install new tunnel with recovery mechanism"""
+        try:
+            self._validate_inputs(ip_version, ip_backend, ports)
+            self._create_configs(ip_version, ip_backend, ports)
+            self._setup_service()
+            self.start_monitoring()
+            return True
+        except Exception as e:
+            print(termcolor.colored(f"Installation failed: {str(e)}", "red"))
+            self._log_error(f"Installation error: {str(e)}")
+            return False
+
+    def _validate_inputs(self, ip_version, ip_backend, ports):
+        """Validate input parameters"""
+        if ip_version not in ['4', '6']:
+            raise ValueError("Invalid IP version. Must be '4' or '6'")
+
+        # Validate IP address format
+        try:
+            socket.inet_pton(socket.AF_INET if ip_version == '4' else socket.AF_INET6, ip_backend)
+        except socket.error:
+            raise ValueError(f"Invalid IPv{ip_version} address format")
+
+        # Validate ports
+        for port in ports:
+            try:
+                port_num = int(port)
+                if not 1 <= port_num <= 65535:
+                    raise ValueError(f"Port {port} out of valid range (1-65535)")
+                if not self._check_port_available(port_num):
+                    raise ValueError(f"Port {port} is already in use")
+            except ValueError as e:
+                raise ValueError(f"Invalid port number: {str(e)}")
+
+    def _check_port_available(self, port):
+        """Check if a port is available for use"""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind(('localhost', port))
+                return True
+            except socket.error:
+                return False
+
+    def _create_configs(self, ip_version, ip_backend, ports):
+        """Create Traefik configuration files"""
+        # Load existing configurations or create new ones
+        traefik_config = self._load_config(CONFIG_FILE) or self._get_default_traefik_config()
+        dynamic_config = self._load_config(DYNAMIC_FILE) or {"tcp": {"routers": {}, "services": {}}}
+
+        # Update configurations
+        self._update_traefik_config(traefik_config, ports)
+        self._update_dynamic_config(dynamic_config, ip_backend, ports)
+
+        # Save configurations
+        self._save_config(CONFIG_FILE, traefik_config)
+        self._save_config(DYNAMIC_FILE, dynamic_config)
+
+    def _get_default_traefik_config(self):
+        """Get default Traefik configuration"""
+        return {
+            "entryPoints": {
+                "dashboard": {
+                    "address": ":8080"
                 }
             },
             "api": {
                 "dashboard": True,
                 "insecure": True
+            },
+            "providers": {
+                "file": {
+                    "filename": DYNAMIC_FILE
+                }
+            },
+            "log": {
+                "level": "INFO"
             }
         }
-    
-    # اضافه کردن پورت‌های جدید
-    for port in new_ports:
-        entry_point_name = f"port_{port}"
-        if "entryPoints" not in existing_config:
-            existing_config["entryPoints"] = {}
-        existing_config["entryPoints"][entry_point_name] = {
-            "address": f":{port}"
-        }
-    
-    return existing_config
 
-def create_dynamic_config(ip_backend, new_ports, existing_config=None):
-    if existing_config is None:
-        existing_config = {"tcp": {"routers": {}, "services": {}}}
-    
-    # اضافه کردن کانفیگ‌های جدید
-    for port in new_ports:
-        router_name = f"tcp_router_{port}"
-        service_name = f"tcp_service_{port}"
-        
-        existing_config["tcp"]["routers"][router_name] = {
-            "entryPoints": [f"port_{port}"],
-            "service": service_name,
-            "rule": "HostSNI(`*`)"
-        }
-        
-        existing_config["tcp"]["services"][service_name] = {
-            "loadBalancer": {
-                "servers": [
-                    {"address": f"{ip_backend}:{port}"}
-                ]
+    def _update_traefik_config(self, config, ports):
+        """Update Traefik configuration with new ports"""
+        for port in ports:
+            entry_point_name = f"port_{port}"
+            config["entryPoints"][entry_point_name] = {
+                "address": f":{port}"
             }
-        }
-    
-    return existing_config
 
-def save_yaml_file(config, filename):
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-    with open(filename, 'w') as f:
-        yaml.dump(config, f, default_flow_style=False, sort_keys=False, indent=2, allow_unicode=True)
+    def _update_dynamic_config(self, config, ip_backend, ports):
+        """Update dynamic configuration with new tunnels"""
+        for port in ports:
+            router_name = f"tcp_router_{port}"
+            service_name = f"tcp_service_{port}"
 
-def install_tunnel():
-    check_requirements()
-    
-    while True:
-        print("\nSelect IP version:")
-        print("1 - IPv6")
-        print("2 - IPv4")
-        version_choice = input("Enter your choice (1/2): ").strip()
-        
-        if version_choice in ['1', '2']:
-            version = '6' if version_choice == '1' else '4'
-            break
-        print(termcolor.colored("Invalid choice. Please enter '1' or '2'.", "red"))
+            config["tcp"]["routers"][router_name] = {
+                "entryPoints": [f"port_{port}"],
+                "service": service_name,
+                "rule": "HostSNI(`*`)"
+            }
 
-    ip_backend = input(f"\nEnter IPv{version} address of the backend server: ").strip()
-    ports_input = input("\nEnter the ports to tunnel (comma-separated): ").strip()
-    new_ports = [port.strip() for port in ports_input.split(',') if port.strip()]
+            config["tcp"]["services"][service_name] = {
+                "loadBalancer": {
+                    "servers": [{"address": f"{ip_backend}:{port}"}]
+                }
+            }
 
-    # Validate ports
-    for port in new_ports:
-        try:
-            port_num = int(port)
-            if not 1 <= port_num <= 65535:
-                raise ValueError()
-            if not check_port_available(port_num):
-                print(termcolor.colored(f"Port {port} is already in use. Please choose another port.", "red"))
-                return
-        except ValueError:
-            print(termcolor.colored(f"Invalid port number: {port}", "red"))
-            return
-
-    # Load existing configs
-    existing_traefik, existing_dynamic = load_existing_config()
-
-    # Merge configurations
-    updated_traefik = merge_configs(existing_traefik, new_ports)
-    updated_dynamic = create_dynamic_config(ip_backend, new_ports, existing_dynamic)
-
-    # Save configurations
-    save_yaml_file(updated_traefik, CONFIG_FILE)
-    save_yaml_file(updated_dynamic, DYNAMIC_FILE)
-
-    # Create service file if it doesn't exist
-    if not os.path.exists(SERVICE_FILE):
+    def _setup_service(self):
+        """Setup and configure the Traefik service"""
         service_content = """[Unit]
 Description=Traefik Tunnel Service
 After=network.target
@@ -178,151 +227,108 @@ After=network.target
 [Service]
 ExecStart=/usr/local/bin/traefik --configFile=/etc/traefik/traefik.yml
 Restart=always
+RestartSec=5
+StartLimitInterval=0
 User=root
 
 [Install]
 WantedBy=multi-user.target"""
-        
+
+        os.makedirs(CONFIG_DIR, exist_ok=True)
         with open(SERVICE_FILE, "w") as f:
             f.write(service_content)
 
-    run_command(["sudo", "systemctl", "daemon-reload"])
-    run_command(["sudo", "systemctl", "enable", "traefik-tunnel.service"])
-    run_command(["sudo", "systemctl", "restart", "traefik-tunnel.service"])
+        subprocess.run(["sudo", "systemctl", "daemon-reload"], check=True)
+        subprocess.run(["sudo", "systemctl", "enable", "traefik-tunnel.service"], check=True)
+        subprocess.run(["sudo", "systemctl", "restart", "traefik-tunnel.service"], check=True)
 
-    print(termcolor.colored("\nTunnel configuration has been updated and service restarted.", "green"))
+    def _load_config(self, filename):
+        """Load YAML configuration file"""
+        try:
+            if os.path.exists(filename):
+                with open(filename, 'r') as f:
+                    return yaml.safe_load(f)
+        except Exception as e:
+            print(termcolor.colored(f"Error loading config {filename}: {str(e)}", "red"))
+        return None
 
-def delete_tunnel():
-    if not os.path.exists(CONFIG_FILE) or not os.path.exists(DYNAMIC_FILE):
-        print(termcolor.colored("No tunnel configuration found.", "red"))
-        return
+    def _save_config(self, filename, config):
+        """Save YAML configuration file"""
+        try:
+            os.makedirs(os.path.dirname(filename), exist_ok=True)
+            with open(filename, 'w') as f:
+                yaml.dump(config, f, default_flow_style=False)
+        except Exception as e:
+            raise Exception(f"Failed to save config {filename}: {str(e)}")
 
-    print(termcolor.colored("\nCurrent tunnel configuration:", "yellow"))
-    list_tunnels()
-    
-    ports_input = input("\nEnter the ports to delete (comma-separated): ").strip()
-    ports_to_delete = [port.strip() for port in ports_input.split(',') if port.strip()]
+    def get_status(self):
+        """Get current tunnel status"""
+        try:
+            response = requests.get("http://localhost:8080/api/rawdata", timeout=5)
+            if response.status_code == 200:
+                return self._parse_status(response.json())
+            return {"error": f"API returned status {response.status_code}"}
+        except requests.exceptions.RequestException as e:
+            return {"error": f"Connection error: {str(e)}"}
 
-    traefik_config, dynamic_config = load_existing_config()
+    def _parse_status(self, status_data):
+        """Parse status data from Traefik API"""
+        result = {
+            "active_tunnels": [],
+            "errors": []
+        }
 
-    # Remove ports from traefik.yml
-    if "entryPoints" in traefik_config:
-        for port in ports_to_delete:
-            entry_point = f"port_{port}"
-            if entry_point in traefik_config["entryPoints"]:
-                del traefik_config["entryPoints"][entry_point]
+        if 'tcp' in status_data and 'routers' in status_data['tcp']:
+            for router, details in status_data['tcp']['routers'].items():
+                tunnel_info = {
+                    "name": router,
+                    "status": "active" if details.get('status') == 'enabled' else "inactive",
+                    "service": details.get('service'),
+                    "backend": self._get_backend_address(details.get('service'), status_data)
+                }
+                result["active_tunnels"].append(tunnel_info)
 
-    # Remove configurations from dynamic.yml
-    for port in ports_to_delete:
-        router_name = f"tcp_router_{port}"
-        service_name = f"tcp_service_{port}"
-        
-        if router_name in dynamic_config["tcp"]["routers"]:
-            del dynamic_config["tcp"]["routers"][router_name]
-        if service_name in dynamic_config["tcp"]["services"]:
-            del dynamic_config["tcp"]["services"][service_name]
+        return result
 
-    # Save updated configurations
-    save_yaml_file(traefik_config, CONFIG_FILE)
-    save_yaml_file(dynamic_config, DYNAMIC_FILE)
+    def _get_backend_address(self, service_name, status_data):
+        """Get backend address for a service"""
+        try:
+            service = status_data['tcp']['services'][service_name]
+            return service['loadBalancer']['servers'][0]['address']
+        except (KeyError, IndexError):
+            return "unknown"
 
-    # Restart service
-    run_command(["sudo", "systemctl", "restart", "traefik-tunnel.service"])
-    print(termcolor.colored("\nSelected tunnels have been deleted and service restarted.", "green"))
-
-def uninstall_tunnel():
-    try:
-        run_command(["sudo", "systemctl", "stop", "traefik-tunnel.service"])
-        run_command(["sudo", "systemctl", "disable", "traefik-tunnel.service"])
-        
-        files_to_remove = [SERVICE_FILE, CONFIG_FILE, DYNAMIC_FILE]
-        for file in files_to_remove:
-            if os.path.exists(file):
-                os.remove(file)
-        
-        run_command(["sudo", "systemctl", "daemon-reload"])
-        print(termcolor.colored("\nTunnel service and configurations have been completely removed.", "green"))
-    except Exception as e:
-        print(termcolor.colored(f"\nError during uninstallation: {e}", "red"))
-
-def list_tunnels():
-    if not os.path.exists(CONFIG_FILE) or not os.path.exists(DYNAMIC_FILE):
-        print(termcolor.colored("No tunnel configuration found.", "red"))
-        return
-
-    try:
-        with open(CONFIG_FILE) as f:
-            traefik_config = yaml.safe_load(f)
-        with open(DYNAMIC_FILE) as f:
-            dynamic_config = yaml.safe_load(f)
-
-        print(termcolor.colored("\nConfigured Tunnels:", "green"))
-        if traefik_config and "entryPoints" in traefik_config:
-            for entry_point, config in traefik_config["entryPoints"].items():
-                if entry_point.startswith("port_"):
-                    port = config["address"].strip(":")
-                    print(f"\nPort: {port}")
-                    
-                    # Find corresponding router and service
-                    router_name = f"tcp_router_{port}"
-                    service_name = f"tcp_service_{port}"
-                    
-                    if dynamic_config and "tcp" in dynamic_config:
-                        if router_name in dynamic_config["tcp"]["routers"]:
-                            if service_name in dynamic_config["tcp"]["services"]:
-                                service = dynamic_config["tcp"]["services"][service_name]
-                                if "loadBalancer" in service and "servers" in service["loadBalancer"]:
-                                    backend = service["loadBalancer"]["servers"][0]["address"]
-                                    print(f"  Backend: {backend}")
-
-    except Exception as e:
-        print(termcolor.colored(f"\nError reading configuration: {e}", "red"))
-
-def display_tunnel_status():
-    try:
-        response = requests.get("http://localhost:8080/api/rawdata")
-        if response.status_code == 200:
-            status = response.json()
-            
-            print(termcolor.colored("\nActive Tunnels Status:", "green"))
-            
-            if 'tcp' in status and 'routers' in status['tcp']:
-                for router, details in status['tcp']['routers'].items():
-                    print(f"\nRouter: {router}")
-                    print(f"  Status: {'✓ Active' if details.get('status') == 'enabled' else '✗ Inactive'}")
-                    print(f"  Service: {details.get('service', 'N/A')}")
-                    
-                    # Show backend details
-                    service_name = details.get('service')
-                    if service_name and 'tcp' in status and 'services' in status['tcp']:
-                        service = status['tcp']['services'].get(service_name, {})
-                        if 'loadBalancer' in service and 'servers' in service['loadBalancer']:
-                            for server in service['loadBalancer']['servers']:
-                                print(f"  Backend: {server.get('address', 'N/A')}")
-            else:
-                print(termcolor.colored("No active TCP tunnels found.", "yellow"))
-                
-        else:
-            print(termcolor.colored("Failed to retrieve Traefik status. Please check if Traefik is running.", "red"))
-    except requests.exceptions.RequestException as e:
-        print(termcolor.colored(f"Error connecting to Traefik API: {e}", "red"))
-
-if __name__ == "__main__":
-    check_and_install_modules()
+def main():
+    """Main entry point"""
+    manager = TunnelManager()
     
     if len(sys.argv) > 1:
         command = sys.argv[1].lower()
+        
         if command == "install":
-            install_tunnel()
-        elif command == "uninstall":
-            uninstall_tunnel()
+            version = input("Enter IP version (4/6): ").strip()
+            ip = input("Enter backend IP: ").strip()
+            ports = input("Enter ports (comma-separated): ").strip().split(',')
+            manager.install_tunnel(version, ip, ports)
+            
         elif command == "status":
-            display_tunnel_status()
-        elif command == "delete":
-            delete_tunnel()
-        elif command == "list":
-            list_tunnels()
+            status = manager.get_status()
+            print(termcolor.colored("\nTunnel Status:", "green"))
+            print(yaml.dump(status, default_flow_style=False))
+            
+        elif command == "monitor":
+            try:
+                manager.start_monitoring()
+                while True:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                manager.stop_monitoring()
         else:
-            print("Invalid command. Use: install, uninstall, status, delete, or list")
+            print(termcolor.colored(f"Unknown command: {command}", "red"))
+            print("Available commands: install, status, monitor")
     else:
-        print("No command provided. Use: install, uninstall, status, delete, or list")
+        print(termcolor.colored("No command provided", "red"))
+        print("Available commands: install, status, monitor")
+
+if __name__ == "__main__":
+    main()
