@@ -1,5 +1,3 @@
-# Part 1: Core functionality and base classes
-
 import os
 import sys
 import subprocess
