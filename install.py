@@ -65,7 +65,7 @@ class TunnelManager:
                 local_ip = subprocess.check_output(cmd, shell=True).decode('utf-8').strip()
                 return local_ip
             except:
-                return 'localhost'
+                return '127.0.0.1'
 
     def _setup_signal_handlers(self):
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -204,7 +204,8 @@ class TunnelManager:
         except Exception as e:
             print(termcolor.colored(f"Error deleting tunnels: {str(e)}", "red"))
             return False
-            def uninstall(self):
+
+    def uninstall(self):
         try:
             print(termcolor.colored("Stopping Traefik service...", "yellow"))
             subprocess.run(["sudo", "systemctl", "stop", "traefik-tunnel.service"], check=True)
@@ -259,7 +260,7 @@ class TunnelManager:
     def _check_port_available(self, port):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             try:
-                sock.bind((self.server_ip, port))
+                sock.bind(('127.0.0.1', port))
                 return True
             except socket.error:
                 return False
