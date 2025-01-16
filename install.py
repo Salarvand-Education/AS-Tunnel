@@ -42,7 +42,8 @@ def check_and_install_modules():
             run_command([sys.executable, "-m", "pip", "install", module])
 
 class TunnelManager:
-    def __init__(self):
+    def __init__(self, api_port):
+        self.api_port = api_port
         self.running = False
         self.monitor_thread = None
         self.last_error = None
@@ -93,15 +94,23 @@ class TunnelManager:
 
     def _check_service_health(self):
         try:
-            result = subprocess.run(["systemctl", "is-active", "traefik-tunnel.service"],
-                                 capture_output=True, text=True, check=True)
+            result = subprocess.run(
+                ["systemctl", "is-active", "traefik-tunnel.service"],
+                capture_output=True,
+                text=True
+            )
             if result.stdout.strip() != "active":
-                raise Exception("Traefik service is not active")
-
-            response = requests.get("http://localhost:8080/api/rawdata", timeout=5)
+                print(termcolor.colored("Service is not running. Starting service...", "yellow"))
+                subprocess.run(["sudo", "systemctl", "start", "traefik-tunnel.service"])
+                time.sleep(5)
+            
+            api_url = f"http://localhost:{self.api_port}/api/rawdata"
+            response = requests.get(api_url, timeout=5)
             if response.status_code != 200:
                 raise Exception(f"API returned status {response.status_code}")
 
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Failed to connect to Traefik API: {str(e)}")
         except Exception as e:
             raise Exception(f"Health check failed: {str(e)}")
 
@@ -172,8 +181,7 @@ class TunnelManager:
             files_to_remove = [
                 SERVICE_FILE,
                 CONFIG_FILE,
-                DYNAMIC_FILE,
-                os.path.join(CONFIG_DIR, "tunnel_errors.log")
+                DYNAMIC_FILE
             ]
 
             for file in files_to_remove:
@@ -200,7 +208,7 @@ class TunnelManager:
     def _validate_inputs(self, ip_version, ip_backend, ports):
         if ip_version not in ['4', '6']:
             raise ValueError("Invalid IP version")
-
+            
         try:
             socket.inet_pton(socket.AF_INET if ip_version == '4' else socket.AF_INET6, ip_backend)
         except socket.error:
@@ -224,21 +232,11 @@ class TunnelManager:
             except socket.error:
                 return False
 
-    def _create_configs(self, ip_backend, ports):
-        traefik_config = self._load_config(CONFIG_FILE) or self._get_default_traefik_config()
-        dynamic_config = self._load_config(DYNAMIC_FILE) or {"tcp": {"routers": {}, "services": {}}}
-
-        self._update_traefik_config(traefik_config, ports)
-        self._update_dynamic_config(dynamic_config, ip_backend, ports)
-
-        self._save_config(CONFIG_FILE, traefik_config)
-        self._save_config(DYNAMIC_FILE, dynamic_config)
-
     def _get_default_traefik_config(self):
         return {
             "entryPoints": {
-                "dashboard": {
-                    "address": ":8080"
+                "api": {
+                    "address": f":{self.api_port}"
                 }
             },
             "api": {
@@ -254,6 +252,16 @@ class TunnelManager:
                 "level": "INFO"
             }
         }
+
+    def _create_configs(self, ip_backend, ports):
+        traefik_config = self._load_config(CONFIG_FILE) or self._get_default_traefik_config()
+        dynamic_config = self._load_config(DYNAMIC_FILE) or {"tcp": {"routers": {}, "services": {}}}
+
+        self._update_traefik_config(traefik_config, ports)
+        self._update_dynamic_config(dynamic_config, ip_backend, ports)
+
+        self._save_config(CONFIG_FILE, traefik_config)
+        self._save_config(DYNAMIC_FILE, dynamic_config)
 
     def _update_traefik_config(self, config, ports):
         for port in ports:
@@ -323,7 +331,8 @@ WantedBy=multi-user.target"""
 
     def get_status(self):
         try:
-            response = requests.get("http://localhost:8080/api/rawdata", timeout=5)
+            api_url = f"http://localhost:{self.api_port}/api/rawdata"
+            response = requests.get(api_url, timeout=5)
             if response.status_code == 200:
                 return self._parse_status(response.json())
             return {"error": f"API returned status {response.status_code}"}
@@ -342,13 +351,8 @@ WantedBy=multi-user.target"""
                     "name": router,
                     "status": "active" if details.get('status') == 'enabled' else "inactive",
                     "service": details.get('service'),
-                    "backend": self._get_backend_address(details.get('service'), status_data)
-                }
-                result["active_tunnels"].append(tunnel_info)
-
-        return result
-
-    def _get_backend_address(self, service_name, status_data):
+                    "backend": self._get_backend_address(details.get('service'), status
+                     def _get_backend_address(self, service_name, status_data):
         try:
             service = status_data['tcp']['services'][service_name]
             return service['loadBalancer']['servers'][0]['address']
@@ -356,10 +360,12 @@ WantedBy=multi-user.target"""
             return "unknown"
 
 def main():
-    manager = TunnelManager()
-    
+    # Get API port from command line arguments
+    api_port = int(sys.argv[2]) if len(sys.argv) > 2 else 8081
+
     if len(sys.argv) > 1:
         command = sys.argv[1].lower()
+        manager = TunnelManager(api_port)
         
         if command == "install":
             version = input("Enter IP version (4/6): ").strip()
@@ -397,4 +403,4 @@ def main():
 
 if __name__ == "__main__":
     check_and_install_modules()
-    main()
+    main()                                    
