@@ -351,7 +351,7 @@ WantedBy=multi-user.target"""
                     "name": router,
                     "status": "active" if details.get('status') == 'enabled' else "inactive",
                     "service": details.get('service'),
-                    "backend": self._get_backend_address(details.get('service')), status
+                    "backend": self._get_backend_address(details.get('service'), status_data)
                      def _get_backend_address(self, service_name, status_data):
         try:
             service = status_data['tcp']['services'][service_name]
