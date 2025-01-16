@@ -1,3 +1,5 @@
+# Part 1: Core functionality and base classes
+
 import os
 import sys
 import subprocess
@@ -152,19 +154,6 @@ class TunnelManager:
             print(termcolor.colored(f"Service health check failed: {str(e)}", "red"))
             raise
 
-    def _attempt_recovery(self):
-        for attempt in range(RETRY_ATTEMPTS):
-            try:
-                print(termcolor.colored(f"Recovery attempt {attempt + 1}/{RETRY_ATTEMPTS}...", "yellow"))
-                subprocess.run(["sudo", "systemctl", "restart", "traefik-tunnel.service"], check=True)
-                time.sleep(RETRY_DELAY)
-                self._check_service_health()
-                print(termcolor.colored("Service recovered successfully", "green"))
-                return
-            except Exception as e:
-                if attempt == RETRY_ATTEMPTS - 1:
-                    print(termcolor.colored(f"Failed to recover service after {RETRY_ATTEMPTS} attempts", "red"))
-
     def _get_default_traefik_config(self):
         return {
             "entryPoints": {
@@ -233,209 +222,156 @@ WantedBy=multi-user.target"""
                               capture_output=True, text=True)
         print(status.stdout)
 
-    def install_tunnel(self, ip_version, ip_backend, ports):
-        try:
-            self._validate_inputs(ip_version, ip_backend, ports)
-            self._check_requirements()
-            self._create_configs(ip_backend, ports)
-            self._setup_service()
-            self.start_monitoring()
-            return True
-        except Exception as e:
-            print(termcolor.colored(f"Installation failed: {str(e)}", "red"))
-            return False
-
-    def delete_tunnel(self, ports_to_delete):
-        try:
-            traefik_config = self._load_config(CONFIG_FILE)
-            dynamic_config = self._load_config(DYNAMIC_FILE)
-
-            if not traefik_config or not dynamic_config:
-                print(termcolor.colored("No tunnel configuration found.", "red"))
-                return False
-
-            for port in ports_to_delete:
-                entry_point = f"port_{port}"
-                if "entryPoints" in traefik_config and entry_point in traefik_config["entryPoints"]:
-                    del traefik_config["entryPoints"][entry_point]
-
-                router_name = f"tcp_router_{port}"
-                service_name = f"tcp_service_{port}"
-
-                if router_name in dynamic_config["tcp"]["routers"]:
-                    del dynamic_config["tcp"]["routers"][router_name]
-                if service_name in dynamic_config["tcp"]["services"]:
-                    del dynamic_config["tcp"]["services"][service_name]
-
-            self._save_config(CONFIG_FILE, traefik_config)
-            self._save_config(DYNAMIC_FILE, dynamic_config)
-
-            subprocess.run(["sudo", "systemctl", "restart", "traefik-tunnel.service"], check=True)
-            print(termcolor.colored("\nSelected tunnels have been deleted successfully.", "green"))
-            return True
-
-        except Exception as e:
-            print(termcolor.colored(f"Error deleting tunnels: {str(e)}", "red"))
-            return False
-
-    def uninstall(self):
-        try:
-            print(termcolor.colored("Stopping Traefik service...", "yellow"))
-            subprocess.run(["sudo", "systemctl", "stop", "traefik-tunnel.service"], check=True)
-            subprocess.run(["sudo", "systemctl", "disable", "traefik-tunnel.service"], check=True)
-
-            files_to_remove = [
-                SERVICE_FILE,
-                CONFIG_FILE,
-                DYNAMIC_FILE
-            ]
-
-            for file in files_to_remove:
-                if os.path.exists(file):
-                    os.remove(file)
-                    print(termcolor.colored(f"Removed {file}", "yellow"))
-
-            if os.path.exists(CONFIG_DIR) and not os.listdir(CONFIG_DIR):
-                os.rmdir(CONFIG_DIR)
-
-            if input("Remove Traefik binary? (y/N): ").lower() == 'y':
-                if os.path.exists("/usr/local/bin/traefik"):
-                    subprocess.run(["sudo", "rm", "/usr/local/bin/traefik"], check=True)
-                    print(termcolor.colored("Removed Traefik binary", "yellow"))
-
-            subprocess.run(["sudo", "systemctl", "daemon-reload"], check=True)
-            print(termcolor.colored("\nTraefik Tunnel Manager has been completely uninstalled.", "green"))
-            return True
-
-        except Exception as e:
-            print(termcolor.colored(f"Error during uninstallation: {str(e)}", "red"))
-            return False
-
-    def _validate_inputs(self, ip_version, ip_backend, ports):
-        if ip_version not in ['4', '6']:
-            raise ValueError("Invalid IP version")
-            
-        try:
-            socket.inet_pton(socket.AF_INET if ip_version == '4' else socket.AF_INET6, ip_backend)
-        except socket.error:
-            raise ValueError(f"Invalid IPv{ip_version} address format")
-
-        for port in ports:
+    def _attempt_recovery(self):
+        for attempt in range(RETRY_ATTEMPTS):
             try:
-                port_num = int(port)
-                if not 1 <= port_num <= 65535:
-                    raise ValueError(f"Port {port} out of valid range (1-65535)")
-                if not self._check_port_available(port_num):
-                    raise ValueError(f"Port {port} is already in use")
-            except ValueError as e:
-                raise ValueError(f"Invalid port number: {str(e)}")
-
-    def _check_port_available(self, port):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            try:
-                sock.bind(('0.0.0.0', port))
-                return True
-            except socket.error:
-                return False
-
-    def _create_configs(self, ip_backend, ports):
-        traefik_config = self._load_config(CONFIG_FILE) or self._get_default_traefik_config()
-        dynamic_config = self._load_config(DYNAMIC_FILE) or {"tcp": {"routers": {}, "services": {}}}
-
-        self._update_traefik_config(traefik_config, ports)
-        self._update_dynamic_config(dynamic_config, ip_backend, ports)
-
-        self._save_config(CONFIG_FILE, traefik_config)
-        self._save_config(DYNAMIC_FILE, dynamic_config)
-
-    def _update_traefik_config(self, config, ports):
-        for port in ports:
-            entry_point_name = f"port_{port}"
-            if "entryPoints" not in config:
-                config["entryPoints"] = {}
-            config["entryPoints"][entry_point_name] = {
-                "address": f"0.0.0.0:{port}"  # Changed from : to 0.0.0.0:
-            }
-
-    def _update_dynamic_config(self, config, ip_backend, ports):
-        for port in ports:
-            router_name = f"tcp_router_{port}"
-            service_name = f"tcp_service_{port}"
-
-            config["tcp"]["routers"][router_name] = {
-                "entryPoints": [f"port_{port}"],
-                "service": service_name,
-                "rule": "HostSNI(`*`)"
-            }
-
-            config["tcp"]["services"][service_name] = {
-                "loadBalancer": {
-                    "servers": [{"address": f"{ip_backend}:{port}"}]
-                }
-            }
-
-    def _load_config(self, filename):
-        try:
-            if os.path.exists(filename):
-                with open(filename, 'r') as f:
-                    return yaml.safe_load(f)
-        except Exception as e:
-            print(termcolor.colored(f"Error loading config {filename}: {str(e)}", "red"))
-        return None
-
-    def _save_config(self, filename, config):
-        try:
-            os.makedirs(os.path.dirname(filename), exist_ok=True)
-            with open(filename, 'w') as f:
-                yaml.dump(config, f, default_flow_style=False)
-        except Exception as e:
-            raise Exception(f"Failed to save config {filename}: {str(e)}")
+                print(termcolor.colored(f"Recovery attempt {attempt + 1}/{RETRY_ATTEMPTS}...", "yellow"))
+                subprocess.run(["sudo", "systemctl", "restart", "traefik-tunnel.service"], check=True)
+                time.sleep(RETRY_DELAY)
+                self._check_service_health()
+                print(termcolor.colored("Service recovered successfully", "green"))
+                return
+            except Exception as e:
+                if attempt == RETRY_ATTEMPTS - 1:
+                    print(termcolor.colored(f"Failed to recover service after {RETRY_ATTEMPTS} attempts", "red"))
 
     def get_status(self):
+        """Get detailed status of all configured tunnels"""
         try:
-            api_urls = [
-                f"http://127.0.0.1:{self.api_port}/api/rawdata",
-                f"http://localhost:{self.api_port}/api/rawdata",
-                f"http://0.0.0.0:{self.api_port}/api/rawdata"
-            ]
-            
-            for url in api_urls:
-                try:
-                    response = requests.get(url, timeout=5)
-                    if response.status_code == 200:
-                        return self._parse_status(response.json())
-                except:
-                    continue
-                    
-            return {"error": "Could not connect to Traefik API"}
-            
-        except requests.exceptions.RequestException as e:
-            return {"error": f"Connection error: {str(e)}"}
+            # First check if service is running
+            service_status = subprocess.run(
+                ["systemctl", "is-active", "traefik-tunnel.service"],
+                capture_output=True,
+                text=True
+            ).stdout.strip()
 
-    def _parse_status(self, status_data):
-        result = {
-            "active_tunnels": [],
-            "errors": []
-        }
-        
-        if 'tcp' in status_data and 'routers' in status_data['tcp']:
-            for router, details in status_data['tcp']['routers'].items():
-                tunnel_info = {
-                    "name": router,
-                    "status": "active" if details.get('status') == 'enabled' else "inactive",
-                    "service": details.get('service'),
-                    "backend": self._get_backend_address(details.get('service'), status_data)
+            if service_status != "active":
+                return {
+                    "status": "error",
+                    "message": "Traefik service is not running",
+                    "active_tunnels": []
                 }
-                result["active_tunnels"].append(tunnel_info)
-        
-        return result
 
-    def _get_backend_address(self, service_name, status_data):
+            # Try to get status from config files first
+            tunnels = self._get_tunnels_from_config()
+            
+            # Then try to get additional status from API
+            api_status = self._get_api_status()
+            
+            # Merge config and API status
+            for tunnel in tunnels:
+                api_tunnel = next(
+                    (t for t in api_status.get("active_tunnels", []) 
+                     if t["port"] == tunnel["port"]), 
+                    None
+                )
+                if api_tunnel:
+                    tunnel.update(api_tunnel)
+                else:
+                    tunnel["status"] = "configured but not active"
+
+            return {
+                "status": "ok",
+                "server_ip": self.server_ip,
+                "active_tunnels": tunnels
+            }
+
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": str(e),
+                "active_tunnels": []
+            }
+
+    def _get_tunnels_from_config(self):
+        """Extract tunnel information from configuration files"""
+        tunnels = []
         try:
-            service = status_data['tcp']['services'][service_name]
-            return service['loadBalancer']['servers'][0]['address']
-        except (KeyError, IndexError):
-            return "unknown"
+            # Load configs
+            traefik_config = self._load_config(CONFIG_FILE) or {}
+            dynamic_config = self._load_config(DYNAMIC_FILE) or {}
+
+            # Get entrypoints (ports)
+            entrypoints = traefik_config.get("entryPoints", {})
+            
+            # Get services (backend destinations)
+            tcp_services = dynamic_config.get("tcp", {}).get("services", {})
+            
+            # Match ports with their backend services
+            for entry_name, entry_data in entrypoints.items():
+                if entry_name.startswith("port_"):
+                    port = entry_name.replace("port_", "")
+                    service_name = f"tcp_service_{port}"
+                    
+                    tunnel = {
+                        "port": port,
+                        "local_address": entry_data.get("address", "unknown"),
+                        "backend": "unknown",
+                        "status": "unknown"
+                    }
+                    
+                    # Get backend information
+                    if service_name in tcp_services:
+                        servers = tcp_services[service_name].get("loadBalancer", {}).get("servers", [])
+                        if servers:
+                            tunnel["backend"] = servers[0].get("address", "unknown")
+                    
+                    tunnels.append(tunnel)
+                    
+            return tunnels
+        except Exception as e:
+            print(termcolor.colored(f"Error reading config: {str(e)}", "red"))
+            return []
+
+    def _get_api_status(self):
+        """Get status information from Traefik API"""
+        api_urls = [
+            f"http://127.0.0.1:{self.api_port}/api/tcp/routers",
+            f"http://localhost:{self.api_port}/api/tcp/routers",
+            f"http://0.0.0.0:{self.api_port}/api/tcp/routers"
+        ]
+        
+        for url in api_urls:
+            try:
+                response = requests.get(url, timeout=5)
+                if response.status_code == 200:
+                    active_tunnels = []
+                    routers_data = response.json()
+                    
+                    for router in routers_data:
+                        if "tcp" in router.get("service", ""):
+                            port = router["service"].split("_")[-1]
+                            active_tunnels.append({
+                                "port": port,
+                                "status": "active" if router.get("status") == "enabled" else "inactive",
+                                "rule": router.get("rule", "unknown"),
+                                "service": router.get("service")
+                            })
+                    
+                    return {"active_tunnels": active_tunnels}
+            except:
+                continue
+        
+        return {"active_tunnels": []}
+
+    def _format_status_output(self, status):
+        """Format status information for display"""
+        output = []
+        output.append(f"\nServer IP: {status.get('server_ip', 'unknown')}")
+        output.append("\nActive Tunnels:")
+        
+        tunnels = status.get("active_tunnels", [])
+        if not tunnels:
+            output.append("  No active tunnels found")
+        else:
+            for tunnel in tunnels:
+                output.append(f"\n  Port: {tunnel.get('port', 'unknown')}")
+                output.append(f"  Status: {tunnel.get('status', 'unknown')}")
+                output.append(f"  Backend: {tunnel.get('backend', 'unknown')}")
+                output.append(f"  Local Address: {tunnel.get('local_address', 'unknown')}")
+                output.append("")
+        
+        return "\n".join(output)
 
 def main():
     # Get API port from command line arguments
@@ -458,8 +394,10 @@ def main():
             
         elif command == "status":
             status = manager.get_status()
-            print(termcolor.colored("\nTunnel Status:", "green"))
-            print(yaml.dump(status, default_flow_style=False))
+            if status.get("status") == "error":
+                print(termcolor.colored(f"\nError: {status.get('message', 'Unknown error')}", "red"))
+            else:
+                print(termcolor.colored(manager._format_status_output(status), "green"))
             
         elif command == "monitor":
             try:
