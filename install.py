@@ -352,7 +352,7 @@ WantedBy=multi-user.target"""
                     "status": "active" if details.get('status') == 'enabled' else "inactive",
                     "service": details.get('service'),
                     "backend": self._get_backend_address(details.get('service'), status
-                     def _get_backend_address(self, service_name, status_data):
+                     def get_backend_address(self, service_name, status_data):
         try:
             service = status_data['tcp']['services'][service_name]
             return service['loadBalancer']['servers'][0]['address']
