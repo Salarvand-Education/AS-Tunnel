@@ -53,19 +53,17 @@ class TunnelManager:
 
     def _get_server_ip(self):
         try:
-            # تلاش برای دریافت IP عمومی
             cmd = "curl -s http://ipv4.icanhazip.com"
             public_ip = subprocess.check_output(cmd, shell=True).decode('utf-8').strip()
             if public_ip:
                 return public_ip
         except:
             try:
-                # تلاش برای دریافت IP داخلی
                 cmd = "hostname -I | cut -d' ' -f1"
                 local_ip = subprocess.check_output(cmd, shell=True).decode('utf-8').strip()
                 return local_ip
             except:
-                return '127.0.0.1'
+                return '0.0.0.0'
 
     def _setup_signal_handlers(self):
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -84,6 +82,7 @@ class TunnelManager:
             run_command(["curl", "-L", "https://github.com/traefik/traefik/releases/download/v3.1.0/traefik_v3.1.0_linux_amd64.tar.gz", "-o", "traefik.tar.gz"])
             run_command(["tar", "-xzf", "traefik.tar.gz"])
             run_command(["sudo", "mv", "traefik", "/usr/local/bin/"])
+            run_command(["sudo", "chmod", "+x", "/usr/local/bin/traefik"])
             os.remove("traefik.tar.gz")
 
     def start_monitoring(self):
@@ -112,40 +111,46 @@ class TunnelManager:
     def _check_service_health(self):
         try:
             print(termcolor.colored("Checking service health...", "yellow"))
-            result = subprocess.run(
-                ["systemctl", "is-active", "traefik-tunnel.service"],
-                capture_output=True,
-                text=True
-            )
+            
+            # First, check service status
+            result = subprocess.run(["systemctl", "is-active", "traefik-tunnel.service"],
+                                 capture_output=True, text=True)
             
             if result.stdout.strip() != "active":
-                print(termcolor.colored("Service is not running. Starting service...", "yellow"))
-                subprocess.run(["sudo", "systemctl", "start", "traefik-tunnel.service"])
-                print(termcolor.colored("Waiting for service to start...", "yellow"))
+                print(termcolor.colored("Service is not active. Checking logs...", "yellow"))
+                logs = subprocess.run(["journalctl", "-u", "traefik-tunnel.service", "-n", "50"],
+                                    capture_output=True, text=True)
+                print(logs.stdout)
+                
+                print(termcolor.colored("Attempting to restart service...", "yellow"))
+                subprocess.run(["sudo", "systemctl", "restart", "traefik-tunnel.service"])
                 time.sleep(10)
+                
+            # Try to connect to API
+            print(termcolor.colored(f"Checking API connection on port {self.api_port}...", "yellow"))
+            api_urls = [
+                f"http://127.0.0.1:{self.api_port}/api/rawdata",
+                f"http://localhost:{self.api_port}/api/rawdata",
+                f"http://0.0.0.0:{self.api_port}/api/rawdata"
+            ]
             
-            print(termcolor.colored(f"Attempting to connect to API at {self.server_ip}:{self.api_port}...", "yellow"))
-            max_retries = 3
-            retry_delay = 5
-            
-            for retry in range(max_retries):
+            connected = False
+            for url in api_urls:
                 try:
-                    api_url = f"http://{self.server_ip}:{self.api_port}/api/rawdata"
-                    response = requests.get(api_url, timeout=10)
+                    response = requests.get(url, timeout=5)
                     if response.status_code == 200:
-                        print(termcolor.colored("Successfully connected to API", "green"))
-                        return
-                    else:
-                        print(termcolor.colored(f"API returned status {response.status_code}", "yellow"))
-                except requests.exceptions.RequestException as e:
-                    print(termcolor.colored(f"Attempt {retry + 1}/{max_retries} failed: {str(e)}", "yellow"))
-                    if retry < max_retries - 1:
-                        time.sleep(retry_delay)
-                        continue
-                    raise Exception("Failed to connect to API after multiple attempts")
+                        print(termcolor.colored(f"Successfully connected to API at {url}", "green"))
+                        connected = True
+                        break
+                except:
+                    continue
+                    
+            if not connected:
+                raise Exception("Could not connect to Traefik API")
 
         except Exception as e:
-            raise Exception(f"Health check failed: {str(e)}")
+            print(termcolor.colored(f"Service health check failed: {str(e)}", "red"))
+            raise
 
     def _attempt_recovery(self):
         for attempt in range(RETRY_ATTEMPTS):
@@ -159,6 +164,74 @@ class TunnelManager:
             except Exception as e:
                 if attempt == RETRY_ATTEMPTS - 1:
                     print(termcolor.colored(f"Failed to recover service after {RETRY_ATTEMPTS} attempts", "red"))
+
+    def _get_default_traefik_config(self):
+        return {
+            "entryPoints": {
+                "traefik": {
+                    "address": f"0.0.0.0:{self.api_port}"
+                }
+            },
+            "api": {
+                "dashboard": True,
+                "insecure": True
+            },
+            "providers": {
+                "file": {
+                    "filename": DYNAMIC_FILE
+                }
+            },
+            "log": {
+                "level": "DEBUG",
+                "format": "common"
+            },
+            "accessLog": {}
+        }
+
+    def _setup_service(self):
+        service_content = f"""[Unit]
+Description=Traefik Tunnel Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/traefik \\
+    --configfile=/etc/traefik/traefik.yml \\
+    --api.dashboard=true \\
+    --api.insecure=true \\
+    --entrypoints.traefik.address=0.0.0.0:{self.api_port} \\
+    --log.level=DEBUG
+Restart=always
+RestartSec=5
+StartLimitInterval=0
+User=root
+
+[Install]
+WantedBy=multi-user.target"""
+
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(SERVICE_FILE, "w") as f:
+            f.write(service_content)
+
+        subprocess.run(["sudo", "systemctl", "daemon-reload"], check=True)
+        subprocess.run(["sudo", "systemctl", "enable", "traefik-tunnel.service"], check=True)
+        
+        # Stop service if running
+        try:
+            subprocess.run(["sudo", "systemctl", "stop", "traefik-tunnel.service"], check=True)
+            time.sleep(2)
+        except:
+            pass
+            
+        # Start service
+        print(termcolor.colored("Starting Traefik service...", "yellow"))
+        subprocess.run(["sudo", "systemctl", "start", "traefik-tunnel.service"], check=True)
+        time.sleep(5)
+        
+        # Check service status
+        status = subprocess.run(["sudo", "systemctl", "status", "traefik-tunnel.service"], 
+                              capture_output=True, text=True)
+        print(status.stdout)
 
     def install_tunnel(self, ip_version, ip_backend, ports):
         try:
@@ -260,36 +333,10 @@ class TunnelManager:
     def _check_port_available(self, port):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             try:
-                sock.bind(('127.0.0.1', port))
+                sock.bind(('0.0.0.0', port))
                 return True
             except socket.error:
                 return False
-
-    def _get_default_traefik_config(self):
-        return {
-            "entryPoints": {
-                "api": {
-                    "address": f":{self.api_port}"
-                },
-                "traefik": {
-                    "address": f":{self.api_port}"
-                }
-            },
-            "api": {
-                "dashboard": True,
-                "insecure": True
-            },
-            "providers": {
-                "file": {
-                    "filename": DYNAMIC_FILE,
-                    "watch": True
-                }
-            },
-            "log": {
-                "level": "DEBUG",
-                "format": "common"
-            }
-        }
 
     def _create_configs(self, ip_backend, ports):
         traefik_config = self._load_config(CONFIG_FILE) or self._get_default_traefik_config()
@@ -307,7 +354,7 @@ class TunnelManager:
             if "entryPoints" not in config:
                 config["entryPoints"] = {}
             config["entryPoints"][entry_point_name] = {
-                "address": f":{port}"
+                "address": f"0.0.0.0:{port}"  # Changed from : to 0.0.0.0:
             }
 
     def _update_dynamic_config(self, config, ip_backend, ports):
@@ -326,34 +373,6 @@ class TunnelManager:
                     "servers": [{"address": f"{ip_backend}:{port}"}]
                 }
             }
-
-    def _setup_service(self):
-        service_content = f"""[Unit]
-Description=Traefik Tunnel Service
-After=network.target
-
-[Service]
-ExecStart=/usr/local/bin/traefik --configFile=/etc/traefik/traefik.yml --api.dashboard=true --api.insecure=true --log.level=DEBUG
-Restart=always
-RestartSec=5
-StartLimitInterval=0
-User=root
-StandardOutput=syslog
-StandardError=syslog
-SyslogIdentifier=traefik-tunnel
-
-[Install]
-WantedBy=multi-user.target"""
-
-        os.makedirs(CONFIG_DIR, exist_ok=True)
-        with open(SERVICE_FILE, "w") as f:
-            f.write(service_content)
-
-        subprocess.run(["sudo", "systemctl", "daemon-reload"], check=True)
-        subprocess.run(["sudo", "systemctl", "enable", "traefik-tunnel.service"], check=True)
-        subprocess.run(["sudo", "systemctl", "restart", "traefik-tunnel.service"], check=True)
-        print(termcolor.colored("Waiting for service to initialize...", "yellow"))
-        time.sleep(10)
 
     def _load_config(self, filename):
         try:
@@ -374,11 +393,22 @@ WantedBy=multi-user.target"""
 
     def get_status(self):
         try:
-            api_url = f"http://{self.server_ip}:{self.api_port}/api/rawdata"
-            response = requests.get(api_url, timeout=5)
-            if response.status_code == 200:
-                return self._parse_status(response.json())
-            return {"error": f"API returned status {response.status_code}"}
+            api_urls = [
+                f"http://127.0.0.1:{self.api_port}/api/rawdata",
+                f"http://localhost:{self.api_port}/api/rawdata",
+                f"http://0.0.0.0:{self.api_port}/api/rawdata"
+            ]
+            
+            for url in api_urls:
+                try:
+                    response = requests.get(url, timeout=5)
+                    if response.status_code == 200:
+                        return self._parse_status(response.json())
+                except:
+                    continue
+                    
+            return {"error": "Could not connect to Traefik API"}
+            
         except requests.exceptions.RequestException as e:
             return {"error": f"Connection error: {str(e)}"}
 
