@@ -281,6 +281,40 @@ WantedBy=multi-user.target"""
             print(termcolor.colored(f"Error deleting tunnels: {str(e)}", "red"))
             return False
 
+    def uninstall(self):
+        """Uninstall the Traefik Tunnel Manager and remove all configurations."""
+        try:
+            print(termcolor.colored("Stopping Traefik service...", "yellow"))
+            subprocess.run(["sudo", "systemctl", "stop", "traefik-tunnel.service"], check=True)
+            subprocess.run(["sudo", "systemctl", "disable", "traefik-tunnel.service"], check=True)
+
+            files_to_remove = [
+                SERVICE_FILE,
+                CONFIG_FILE,
+                DYNAMIC_FILE
+            ]
+
+            for file in files_to_remove:
+                if os.path.exists(file):
+                    os.remove(file)
+                    print(termcolor.colored(f"Removed {file}", "yellow"))
+
+            if os.path.exists(CONFIG_DIR) and not os.listdir(CONFIG_DIR):
+                os.rmdir(CONFIG_DIR)
+
+            if input("Remove Traefik binary? (y/N): ").lower() == 'y':
+                if os.path.exists("/usr/local/bin/traefik"):
+                    subprocess.run(["sudo", "rm", "/usr/local/bin/traefik"], check=True)
+                    print(termcolor.colored("Removed Traefik binary", "yellow"))
+
+            subprocess.run(["sudo", "systemctl", "daemon-reload"], check=True)
+            print(termcolor.colored("\nTraefik Tunnel Manager has been completely uninstalled.", "green"))
+            return True
+
+        except Exception as e:
+            print(termcolor.colored(f"Error during uninstallation: {str(e)}", "red"))
+            return False
+
     def _validate_inputs(self, ip_version, ip_backend, ports):
         """Validate user inputs for IP version, backend IP, and ports."""
         if ip_version not in ['4', '6']:
