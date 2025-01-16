@@ -59,6 +59,16 @@ class TunnelManager:
         self.stop_monitoring()
         sys.exit(0)
 
+    def _check_requirements(self):
+        try:
+            subprocess.run(["which", "traefik"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except subprocess.CalledProcessError:
+            print(termcolor.colored("Traefik is not installed. Installing Traefik...", "yellow"))
+            run_command(["curl", "-L", "https://github.com/traefik/traefik/releases/download/v3.1.0/traefik_v3.1.0_linux_amd64.tar.gz", "-o", "traefik.tar.gz"])
+            run_command(["tar", "-xzf", "traefik.tar.gz"])
+            run_command(["sudo", "mv", "traefik", "/usr/local/bin/"])
+            os.remove("traefik.tar.gz")
+
     def start_monitoring(self):
         self.running = True
         self.monitor_thread = threading.Thread(target=self._monitor_tunnels)
@@ -84,23 +94,46 @@ class TunnelManager:
 
     def _check_service_health(self):
         try:
+            print(termcolor.colored("Checking service health...", "yellow"))
             result = subprocess.run(
                 ["systemctl", "is-active", "traefik-tunnel.service"],
                 capture_output=True,
                 text=True
             )
+            
             if result.stdout.strip() != "active":
                 print(termcolor.colored("Service is not running. Starting service...", "yellow"))
                 subprocess.run(["sudo", "systemctl", "start", "traefik-tunnel.service"])
-                time.sleep(5)
+                print(termcolor.colored("Waiting for service to start...", "yellow"))
+                time.sleep(10)
             
-            api_url = f"http://localhost:{self.api_port}/api/rawdata"
-            response = requests.get(api_url, timeout=5)
-            if response.status_code != 200:
-                raise Exception(f"API returned status {response.status_code}")
+            # Check logs for any issues
+            print(termcolor.colored("Checking service logs...", "yellow"))
+            logs = subprocess.run(["journalctl", "-u", "traefik-tunnel.service", "-n", "50"], 
+                                capture_output=True, text=True)
+            if "error" in logs.stdout.lower():
+                print(termcolor.colored(f"Service logs show errors:\n{logs.stdout}", "red"))
+            
+            print(termcolor.colored(f"Attempting to connect to API at port {self.api_port}...", "yellow"))
+            max_retries = 3
+            retry_delay = 5
+            
+            for retry in range(max_retries):
+                try:
+                    api_url = f"http://localhost:{self.api_port}/api/rawdata"
+                    response = requests.get(api_url, timeout=10)
+                    if response.status_code == 200:
+                        print(termcolor.colored("Successfully connected to API", "green"))
+                        return
+                    else:
+                        print(termcolor.colored(f"API returned status {response.status_code}", "yellow"))
+                except requests.exceptions.RequestException as e:
+                    print(termcolor.colored(f"Attempt {retry + 1}/{max_retries} failed: {str(e)}", "yellow"))
+                    if retry < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    raise Exception("Failed to connect to API after multiple attempts")
 
-        except requests.exceptions.RequestException as e:
-            raise Exception(f"Failed to connect to Traefik API: {str(e)}")
         except Exception as e:
             raise Exception(f"Health check failed: {str(e)}")
 
@@ -117,6 +150,18 @@ class TunnelManager:
                 if attempt == RETRY_ATTEMPTS - 1:
                     print(termcolor.colored(f"Failed to recover service after {RETRY_ATTEMPTS} attempts", "red"))
 
+    def check_traefik_logs(self):
+        try:
+            logs = subprocess.run(
+                ["journalctl", "-u", "traefik-tunnel.service", "-n", "50"],
+                capture_output=True,
+                text=True
+            ).stdout
+            print(termcolor.colored("Recent Traefik logs:", "yellow"))
+            print(logs)
+        except Exception as e:
+            print(termcolor.colored(f"Error getting logs: {str(e)}", "red"))
+
     def install_tunnel(self, ip_version, ip_backend, ports):
         try:
             self._validate_inputs(ip_version, ip_backend, ports)
@@ -128,16 +173,6 @@ class TunnelManager:
         except Exception as e:
             print(termcolor.colored(f"Installation failed: {str(e)}", "red"))
             return False
-
-    def _check_requirements(self):
-        try:
-            subprocess.run(["which", "traefik"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        except subprocess.CalledProcessError:
-            print(termcolor.colored("Traefik is not installed. Installing Traefik...", "yellow"))
-            run_command(["curl", "-L", "https://github.com/traefik/traefik/releases/download/v3.1.0/traefik_v3.1.0_linux_amd64.tar.gz", "-o", "traefik.tar.gz"])
-            run_command(["tar", "-xzf", "traefik.tar.gz"])
-            run_command(["sudo", "mv", "traefik", "/usr/local/bin/"])
-            os.remove("traefik.tar.gz")
 
     def delete_tunnel(self, ports_to_delete):
         try:
@@ -237,6 +272,9 @@ class TunnelManager:
             "entryPoints": {
                 "api": {
                     "address": f":{self.api_port}"
+                },
+                "traefik": {
+                    "address": f":{self.api_port}"
                 }
             },
             "api": {
@@ -245,11 +283,13 @@ class TunnelManager:
             },
             "providers": {
                 "file": {
-                    "filename": DYNAMIC_FILE
+                    "filename": DYNAMIC_FILE,
+                    "watch": True
                 }
             },
             "log": {
-                "level": "INFO"
+                "level": "DEBUG",
+                "format": "common"
             }
         }
 
@@ -290,16 +330,19 @@ class TunnelManager:
             }
 
     def _setup_service(self):
-        service_content = """[Unit]
+        service_content = f"""[Unit]
 Description=Traefik Tunnel Service
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/traefik --configFile=/etc/traefik/traefik.yml
+ExecStart=/usr/local/bin/traefik --configFile=/etc/traefik/traefik.yml --api.dashboard=true --api.insecure=true --log.level=DEBUG
 Restart=always
 RestartSec=5
 StartLimitInterval=0
 User=root
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=traefik-tunnel
 
 [Install]
 WantedBy=multi-user.target"""
@@ -311,8 +354,9 @@ WantedBy=multi-user.target"""
         subprocess.run(["sudo", "systemctl", "daemon-reload"], check=True)
         subprocess.run(["sudo", "systemctl", "enable", "traefik-tunnel.service"], check=True)
         subprocess.run(["sudo", "systemctl", "restart", "traefik-tunnel.service"], check=True)
-
-    def _load_config(self, filename):
+        print(termcolor.colored("Waiting for service to initialize...", "yellow"))
+        time.sleep(10)
+        def _load_config(self, filename):
         try:
             if os.path.exists(filename):
                 with open(filename, 'r') as f:
@@ -354,7 +398,7 @@ WantedBy=multi-user.target"""
                     "backend": self._get_backend_address(details.get('service'), status_data)
                 }
                 result["active_tunnels"].append(tunnel_info)
-                
+        
         return result
 
     def _get_backend_address(self, service_name, status_data):
